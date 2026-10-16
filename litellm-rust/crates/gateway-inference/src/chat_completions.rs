@@ -63,8 +63,9 @@ async fn handle(
     let mut body = Some(body);
     let routed = gateway
         .models
-        .route(
+        .route_where(
             group,
+            request::usable(identity),
             |attempt| {
                 // Only the last attempt may move the body; earlier ones keep it for a retry.
                 let body = if attempt.last {
@@ -109,7 +110,8 @@ async fn handle(
             },
             Error::failure,
         )
-        .await?;
+        .await
+        .ok_or_else(|| Error::UnknownModel(name.clone()))??;
     Ok(cache_headers.apply(request::hold(routed)))
 }
 
