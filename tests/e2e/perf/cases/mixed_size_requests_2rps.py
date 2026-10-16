@@ -51,8 +51,8 @@ CASE: Final = PerformanceTestCase(
     guardrails=(Guardrail("perf-pre", mode="pre_call"), Guardrail("perf-post", mode="post_call")),
     traffic=Traffic(
         seed=7,
-        rps=2.0,
-        total_requests=1200,
+        rps=3.0,
+        total_requests=1800,
         endpoints={"chat_completions": 0.5, "responses": 0.25, "messages": 0.25},
         shapes={SHORT: 0.75, LONG: 0.25},
         stream_share=0.5,
