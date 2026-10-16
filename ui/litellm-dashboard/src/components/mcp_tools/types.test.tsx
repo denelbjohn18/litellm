@@ -333,6 +333,16 @@ describe("preservedAdminCredentials vs preservedDeclaredAppCredentials", () => {
     expect(preservedAdminCredentials(credentials)).toEqual({ client_id: "cid", upstream_resource: "auto" });
   });
 
+  // The scopes an admin types for an OAuth Delegate server (an Entra app's api://.../.default) are
+  // the only array in `credentials`; a string-only filter would silently drop them on every edit.
+  it("preserves admin-typed scopes and drops blank ones", () => {
+    expect(preservedAdminCredentials({ client_id: "cid", scopes: ["api://mcp/.default", ""] })).toEqual({
+      client_id: "cid",
+      scopes: ["api://mcp/.default"],
+    });
+    expect(preservedAdminCredentials({ client_id: "cid", scopes: [] })).toEqual({ client_id: "cid" });
+  });
+
   // The two helpers answer different questions and must not be collapsed: "has the admin declared an
   // OAuth app" gates the app-may-not-match-upstream warning, so a resource-only server must read as
   // having no declared app.
