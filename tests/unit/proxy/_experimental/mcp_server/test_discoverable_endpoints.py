@@ -6034,6 +6034,113 @@ async def test_register_bridge_relay_never_persists():
     mock_persist.assert_not_called()
 
 
+_LAPTOP_LOOPBACK_REDIRECT = "http://127.0.0.1:33418/"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_type_value", ["oauth_delegate", "true_passthrough"])
+async def test_register_bridge_with_proxy_base_url_registers_gateway_client_not_laptop_loopback(
+    monkeypatch, auth_type_value
+):
+    """A laptop MCP client (VS Code) registers with its own loopback redirect. With PROXY_BASE_URL set
+    the gateway must not relay that registration upstream: it registers its one shared client bound
+    to the gateway /callback, keeps it, and hands the caller a client bound to the caller's loopback.
+    Relaying the loopback is the customer failure on upstreams that restrict redirect domains."""
+    import json
+
+    from litellm.types.mcp import MCPAuth
+
+    monkeypatch.setenv("PROXY_BASE_URL", "https://litellm.example.com")
+    response, mock_async_client, mock_persist = await _bridge_register_response(
+        _bridge_server(auth_type=MCPAuth(auth_type_value)),
+        {"client_name": "Visual Studio Code", "redirect_uris": [_LAPTOP_LOOPBACK_REDIRECT]},
+    )
+
+    posted = mock_async_client.post.call_args.kwargs["json"]
+    assert posted["redirect_uris"] == ["https://litellm.example.com/callback"], posted
+    assert posted["client_name"] == "LiteLLM Proxy", posted
+    mock_persist.assert_awaited_once()
+
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["redirect_uris"] == [_LAPTOP_LOOPBACK_REDIRECT], payload
+
+
+@pytest.mark.asyncio
+async def test_register_bridge_without_proxy_base_url_still_relays_client_registration(monkeypatch):
+    """Without PROXY_BASE_URL the gateway cannot keep a shared client, so the relay arm remains the
+    fallback and the caller's own redirect goes upstream as before."""
+    monkeypatch.delenv("PROXY_BASE_URL", raising=False)
+    _, mock_async_client, mock_persist = await _bridge_register_response(
+        _bridge_server(),
+        {"client_name": "Visual Studio Code", "redirect_uris": [_LAPTOP_LOOPBACK_REDIRECT]},
+    )
+
+    assert mock_async_client.post.call_args.kwargs["json"]["redirect_uris"] == [_LAPTOP_LOOPBACK_REDIRECT]
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.parametrize("auth_type_value", ["oauth_delegate", "true_passthrough"])
+def test_bridge_authorize_and_token_arms_use_gateway_callback_when_origin_is_configured(monkeypatch, auth_type_value):
+    """The authorize and token handlers pick their arm from the same predicate the register flow
+    uses. A clientless bridge with PROXY_BASE_URL set is the gateway-callback arm (the shared client
+    registered at /register), and only a gateway with no configured origin relays."""
+    from litellm.proxy._experimental.mcp_server.discoverable_endpoints import (
+        _dcr_bridge_relays_client_registration,
+    )
+    from litellm.types.mcp import MCPAuth
+
+    clientless = _bridge_server(auth_type=MCPAuth(auth_type_value))
+
+    monkeypatch.setenv("PROXY_BASE_URL", "https://litellm.example.com")
+    assert _dcr_bridge_relays_client_registration(clientless) is False
+
+    monkeypatch.delenv("PROXY_BASE_URL", raising=False)
+    assert _dcr_bridge_relays_client_registration(clientless) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dcr_bridge", "expected"),
+    [(True, "persisted"), (False, "skipped")],
+)
+async def test_persist_dcr_client_for_client_forwarded_server_only_when_it_is_a_bridge(dcr_bridge, expected):
+    """A DCR bridge keeps the shared gateway client on the server row (without stamping oauth2_flow on
+    a client-forwarded row), while a client-forwarded server without the bridge still stores nothing."""
+    from litellm.proxy._experimental.mcp_server.discoverable_endpoints import (
+        _persist_dcr_client_registration,
+    )
+    from litellm.proxy._experimental.mcp_server.mcp_server_manager import (
+        global_mcp_server_manager,
+    )
+    from litellm.types.mcp import MCPAuth
+
+    server = _bridge_server(auth_type=MCPAuth.oauth_delegate, dcr_bridge=dcr_bridge)
+    prisma = MagicMock()
+    prisma.db.litellm_mcpservertable.find_unique = AsyncMock(return_value=None)
+    mock_update = AsyncMock(return_value=MagicMock())
+    with (
+        patch("litellm.proxy.utils.get_prisma_client_or_throw", return_value=prisma),
+        patch("litellm.proxy._experimental.mcp_server.db.update_mcp_server", new=mock_update),
+        patch.object(global_mcp_server_manager, "update_server", new=AsyncMock()),
+        patch.object(global_mcp_server_manager, "is_config_declared_server", return_value=False),
+    ):
+        result = await _persist_dcr_client_registration(
+            server,
+            {"client_id": "shared-gateway-client", "token_endpoint_auth_method": "none"},
+            "https://litellm.example.com/callback",
+            replace_stale_client=False,
+        )
+
+    assert result == expected
+    if expected == "skipped":
+        mock_update.assert_not_awaited()
+        return
+    written = mock_update.await_args.kwargs["data"]
+    assert written.oauth2_flow is None, written
+    assert written.credentials["client_id"] == "shared-gateway-client", written
+    assert server.client_id == "shared-gateway-client"
+
+
 _BRIDGE_MASTER_KEY = "sk-bridge-producer-master-key-0123456789abcdef"
 
 

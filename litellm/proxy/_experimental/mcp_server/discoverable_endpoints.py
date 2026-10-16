@@ -856,15 +856,22 @@ def _raise_unless_oauth2_discovery_server(
 
 def _dcr_bridge_relays_client_registration(mcp_server: MCPServer) -> bool:
     """True when a DCR-bridge server relays client registration to the upstream authorization
-    server instead of short-circuiting to an admin-configured OAuth client. In the relay arm the
+    server instead of short-circuiting to the server's own OAuth client. In the relay arm the
     upstream holds each client's own registration, so the authorize and token relays pass the
     client's ``client_id`` and ``redirect_uri`` through verbatim and the authorization code
     returns directly to the client's redirect URI without transiting the gateway. Gateway-side
     redirect trust and the ``/callback`` state relay therefore only apply to the short-circuit
-    arm, where the upstream only knows the gateway's own callback."""
+    arm, where the upstream only knows the gateway's own callback.
+
+    The relay is the last resort: with ``PROXY_BASE_URL`` set the gateway registers one shared
+    client bound to its own ``/callback`` and keeps it as the server's client, so an upstream that
+    restricts redirect domains (Atlassian) never sees a laptop loopback redirect. Only a gateway
+    that cannot persist that shared client (no ``PROXY_BASE_URL``) relays the caller's own
+    registration."""
     return bool(
         mcp_server.is_dcr_bridge
         and mcp_server.effective_registration_url
+        and configured_proxy_base_url() is None
         and not (
             mcp_server.client_id
             and oauth_client_registration_matches(
@@ -1824,10 +1831,13 @@ async def _persist_dcr_client_registration(
     empty and otherwise adopts whatever a concurrent registration persisted first.
 
     The client-forwarded token modes (``true_passthrough`` / ``oauth_delegate``) are skipped
-    unconditionally: the caller holds the upstream token and the gateway must hold no OAuth
-    client identity for these servers. Persisting here would stamp ``oauth2_flow`` and a
-    ``client_id`` onto a server whose mode promises the gateway stores nothing, making a
-    fresh pass-through server read as gateway-authorized.
+    unless the server is a DCR bridge: the caller holds the upstream token and the gateway holds
+    no OAuth client identity for these servers, so persisting would stamp ``oauth2_flow`` and a
+    ``client_id`` onto a server whose mode promises the gateway stores nothing. A DCR bridge is
+    the exception by design: its gateway-hosted sign-in registers one shared client bound to the
+    gateway ``/callback`` (the same app an admin may enter by hand), and that client must survive
+    for every later caller's authorize and token exchange. ``oauth2_flow`` is still never stamped
+    on a client-forwarded row.
 
     ``redirect_uris`` records what the client is bound to so a later origin change can be
     detected as a positive mismatch and trigger re-registration instead of stranding the
@@ -1836,7 +1846,7 @@ async def _persist_dcr_client_registration(
     ``update_mcp_server`` merges credential blobs: a re-registered public client must not
     inherit the previous client's secret or auth method.
     """
-    if mcp_server.is_client_forwarded_token:
+    if mcp_server.is_client_forwarded_token and not mcp_server.is_dcr_bridge:
         return "skipped"
 
     try:
@@ -1904,20 +1914,23 @@ async def _persist_dcr_client_registration(
         ):
             await _refresh_persisted_dcr_server(stored)
             return "reused"
+        stamped_flow: Final[Literal["authorization_code"] | None] = (
+            None if mcp_server.is_client_forwarded_token else "authorization_code"
+        )
         updated_row: Final = await update_mcp_server(
             prisma_client=prisma_client,
             data=(
                 UpdateMCPServerRequest(
                     server_id=mcp_server.server_id,
                     credentials=credentials,
-                    oauth2_flow="authorization_code",
+                    oauth2_flow=stamped_flow,
                     token_url=mcp_server.token_url,
                 )
                 if mcp_server.token_url
                 else UpdateMCPServerRequest(
                     server_id=mcp_server.server_id,
                     credentials=credentials,
-                    oauth2_flow="authorization_code",
+                    oauth2_flow=stamped_flow,
                 )
             ),
             touched_by="mcp_oauth_dcr",
