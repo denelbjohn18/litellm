@@ -74,6 +74,41 @@ class TeamGrants(TypedDict, total=False):
     team_member_rpm_limit: ReadOnly[int | None]
 
 
+_TEAM_GRANT_AUTH_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "team_alias",
+        "team_tpm_limit",
+        "team_rpm_limit",
+        "team_tpd_limit",
+        "team_max_budget",
+        "team_soft_budget",
+        "team_spend",
+        "team_metadata",
+        "team_member",
+        "team_member_spend",
+        "team_member_tpm_limit",
+        "team_member_rpm_limit",
+    }
+)
+
+
+def team_grant_auth_update(
+    team_object: LiteLLM_TeamTable,
+    team_membership: LiteLLM_TeamMembership | None,
+    user_id: str | None,
+    *,
+    key_org_id: str | None,
+) -> Mapping[str, object]:
+    grant_values: Final = team_grants(team_object, team_membership, user_id)
+    return MappingProxyType(
+        {
+            "team_id": team_object.team_id,
+            "org_id": key_org_id or team_object.organization_id,
+            **{field: value for field, value in grant_values.items() if field in _TEAM_GRANT_AUTH_FIELDS},
+        }
+    )
+
+
 def _json_columns(team_object: LiteLLM_TeamTable) -> _TeamJsonColumns:
     try:
         return _TeamJsonColumns.model_validate(team_object.model_dump(include=_JSON_COLUMNS))
